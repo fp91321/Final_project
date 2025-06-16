@@ -4,6 +4,8 @@ import tkinter.font as tkFont
 import pandas as pd
 import numpy as np
 import requests
+import json
+from datetime import datetime
 import yfinance as yf
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
@@ -17,7 +19,108 @@ warnings.filterwarnings('ignore')
 
 # Set matplotlib style for dark theme
 plt.style.use('dark_background')
-
+class FreeWeatherProvider:
+    """免費天氣資料提供者"""
+    
+    def __init__(self):
+        self.cache = {}
+        self.last_update = 0
+        self.cache_duration = 600  # 10分鐘緩存
+        
+    def get_weather_data(self, city="Tainan"):
+        """獲取天氣資料 - 使用多個免費API"""
+        current_time = time.time()
+        
+        # 檢查緩存
+        if (city in self.cache and 
+            current_time - self.last_update < self.cache_duration):
+            return self.cache[city]
+        
+        # 嘗試多個免費API
+        weather_data = self._try_wttr_api(city) or self._try_7timer_api(city)
+        
+        if weather_data:
+            self.cache[city] = weather_data
+            self.last_update = current_time
+            return weather_data
+        
+        return self._get_fallback_weather()
+    
+    def _try_wttr_api(self, city):
+        """嘗試 wttr.in API"""
+        try:
+            url = f"https://wttr.in/{city}?format=j1"
+            response = requests.get(url, timeout=8)
+            
+            if response.status_code == 200:
+                data = response.json()
+                current = data['current_condition'][0]
+                
+                return {
+                    'temperature': int(current['temp_C']),
+                    'condition': current['weatherDesc'][0]['value'],
+                    'humidity': int(current['humidity']),
+                    'feels_like': int(current['FeelsLikeC']),
+                    'wind_speed': current['windspeedKmph'],
+                    'source': 'wttr.in'
+                }
+        except Exception as e:
+            print(f"wttr.in API 錯誤: {e}")
+            return None
+    
+    def _try_7timer_api(self, city):
+        """嘗試 7Timer! API (需要座標)"""
+        try:
+            # 台南的座標
+            coords = {
+                'Tainan': (22.99, 120.21),
+                'Taipei': (25.04, 121.51),
+                'Kaohsiung': (22.63, 120.30)
+            }
+            
+            if city not in coords:
+                return None
+                
+            lat, lon = coords[city]
+            url = f"http://www.7timer.info/bin/api.pl?lon={lon}&lat={lat}&product=civil&output=json"
+            response = requests.get(url, timeout=8)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data['dataseries']:
+                    current = data['dataseries'][0]
+                    
+                    # 7Timer 使用不同的數據格式
+                    weather_map = {
+                        'clear': 'Clear',
+                        'pcloudy': 'Partly Cloudy',
+                        'cloudy': 'Cloudy',
+                        'rain': 'Rain'
+                    }
+                    
+                    return {
+                        'temperature': current['temp2m'],
+                        'condition': weather_map.get(current['weather'], 'Unknown'),
+                        'humidity': 70,  # 7Timer 不提供濕度，使用預設值
+                        'feels_like': current['temp2m'],
+                        'wind_speed': current['wind10m']['speed'],
+                        'source': '7Timer!'
+                    }
+        except Exception as e:
+            print(f"7Timer API 錯誤: {e}")
+            return None
+    
+    def _get_fallback_weather(self):
+        """備用天氣資料"""
+        return {
+            'temperature': 28,
+            'condition': 'Partly Cloudy',
+            'humidity': 75,
+            'feels_like': 30,
+            'wind_speed': '10',
+            'source': 'Fallback'
+        }
+    
 class SimpleForexPredictor:
     """Simplified forex prediction model without TensorFlow dependency"""
     
@@ -305,7 +408,7 @@ class ForexTradingGUI:
                                      font=self.normal_font, fg='#ffffff', bg='#2d2d2d',
                                      wraplength=350, justify='left')
         self.weather_label.pack(padx=10, pady=10)
-        
+        """
         # Precious metals prices
         metals_frame = tk.LabelFrame(parent, text="🥇 Precious Metals", font=self.header_font,
                                     fg='#00ff88', bg='#2d2d2d', bd=2)
@@ -318,7 +421,7 @@ class ForexTradingGUI:
         self.silver_label = tk.Label(metals_frame, text=f"Silver: ${self.silver_price:.2f}/oz", 
                                     font=self.normal_font, fg='#c0c0c0', bg='#2d2d2d')
         self.silver_label.pack(padx=10, pady=5)
-        
+        """
         # Trading parameters setup
         self.create_parameter_panel(parent)
     
@@ -629,32 +732,59 @@ class ForexTradingGUI:
                 
             # Update weather and metals prices
             self.update_weather_info()
-            self.update_metals_prices()
+            #self.update_metals_prices()
             
         except Exception as e:
             self.status_label.config(text=f"Market data update error: {str(e)}")
             
     def update_weather_info(self):
-        """Update weather information"""
+        """Free API"""
+        try:
+            if not hasattr(self, 'free_weather_provider'):
+                self.free_weather_provider = FreeWeatherProvider()
+            
+            weather_data = self.free_weather_provider.get_weather_data("Tainan")
+            
+            # 天氣狀況對應表情符號
+            condition_emojis = {
+                'Clear': '☀️',
+                'Sunny': '☀️', 
+                'Partly Cloudy': '⛅',
+                'Partly cloudy': '⛅',
+                'Cloudy': '☁️',
+                'Overcast': '☁️',
+                'Rain': '🌧️',
+                'Light rain': '🌧️',
+                'Heavy rain': '⛈️',
+                'Snow': '❄️',
+                'Fog': '🌫️'
+            }
+            
+            condition = weather_data['condition']
+            emoji = condition_emojis.get(condition, '🌤️')
+            
+            weather_text = (f"Tainan: {condition} {emoji}\tTemperature: {weather_data['temperature']}°C\n"
+                        f"Feels like: {weather_data['feels_like']}°C\t\tHumidity: {weather_data['humidity']}%\n"
+                        f"Source: {weather_data['source']}")
+            
+            self.weather_label.config(text=weather_text)
+            
+        except Exception as e:
+            print(f"天氣更新錯誤: {e}")
+            # 使用備用方法
+            self.update_weather_info_fallback()
+
+    def update_weather_info_fallback(self):
+        """備用天氣更新方法"""
+        import numpy as np
         weather_conditions = ["Sunny☀️", "Cloudy⛅", "Light Rain🌧️", "Overcast☁️"]
         temperature = np.random.randint(22, 32)
         condition = np.random.choice(weather_conditions)
         humidity = np.random.randint(60, 85)
         
-        weather_text = f"Tainan City: {condition}\nTemperature: {temperature}°C\nHumidity: {humidity}%"
+        weather_text = f"Tainan: {condition}\nTemperature: {temperature}°C\nHumidity: {humidity}%\n(Simulated)"
         self.weather_label.config(text=weather_text)
-        
-    def update_metals_prices(self):
-        """Update precious metals prices"""
-        self.gold_price += np.random.normal(0, 5)
-        self.silver_price += np.random.normal(0, 0.5)
-        
-        self.gold_price = max(1800, self.gold_price)
-        self.silver_price = max(20, self.silver_price)
-        
-        self.gold_label.config(text=f"Gold: ${self.gold_price:.2f}/oz")
-        self.silver_label.config(text=f"Silver: ${self.silver_price:.2f}/oz")
-        
+
     def update_ai_predictions(self):
         """Update AI predictions"""
         try:
