@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
+from tkinter import scrolledtext
 import tkinter.font as tkFont
 import pandas as pd
 import numpy as np
@@ -15,10 +16,753 @@ import threading
 import time
 from sklearn.preprocessing import MinMaxScaler
 import warnings
-warnings.filterwarnings('ignore')
+from keras.models import load_model
+import joblib
 
+
+warnings.filterwarnings('ignore')
 # Set matplotlib style for dark theme
 plt.style.use('dark_background')
+class SimulationWindow:
+    def __init__(self, parent, main_gui):
+        self.parent = parent
+        self.main_gui = main_gui
+        self.window = tk.Toplevel(parent)
+        
+        # 初始化所有必要的屬性
+        self.simulation_running = False
+        self.fx_trading = None
+        self.simulation_thread = None
+        
+        self.setup_window()
+        self.create_widgets()
+        
+    def setup_window(self):
+        """設置模擬視窗"""
+        self.window.title("🔮 90-Day Trading Simulation with AI Model")
+        self.window.geometry("1600x1000")
+        self.window.configure(bg='#1e1e1e')
+        self.window.resizable(True, True)
+        
+        # 設置字體
+        self.title_font = ('Arial', 14, 'bold')
+        self.header_font = ('Arial', 12, 'bold')
+        self.normal_font = ('Arial', 10)
+        self.small_font = ('Arial', 9)
+        
+    def create_widgets(self):
+        """創建視窗組件"""
+        # 標題
+        title_frame = tk.Frame(self.window, bg='#2d2d2d', height=50)
+        title_frame.pack(fill='x', padx=10, pady=5)
+        title_frame.pack_propagate(False)
+        
+        title_label = tk.Label(title_frame, text="🔮 90-Day AI Trading Simulation Dashboard",
+                              font=self.title_font, fg='#00ff88', bg='#2d2d2d')
+        title_label.pack(pady=10)
+        
+        # 主要內容區域
+        main_content = tk.Frame(self.window, bg='#1e1e1e')
+        main_content.pack(fill='both', expand=True, padx=10, pady=5)
+        
+        # 左側：控制面板和詳細數據
+        left_panel = tk.Frame(main_content, bg='#2d2d2d', width=800)
+        left_panel.pack(side='left', fill='both', expand=True, padx=5)
+        left_panel.pack_propagate(False)
+        
+        # 右側：圖表
+        right_panel = tk.Frame(main_content, bg='#2d2d2d', width=600)
+        right_panel.pack(side='right', fill='both', expand=True, padx=5)
+        
+        self.create_control_panel(left_panel)
+        self.create_detailed_data_panel(left_panel)
+        self.create_charts_panel(right_panel)
+        
+    def create_control_panel(self, parent):
+        """創建控制面板"""
+        control_frame = tk.LabelFrame(parent, text="🎮 Simulation Control", 
+                                     font=self.header_font, fg='#00ff88', bg='#2d2d2d')
+        control_frame.pack(fill='x', padx=10, pady=5)
+        
+        # 數據來源選擇
+        data_source_frame = tk.Frame(control_frame, bg='#2d2d2d')
+        data_source_frame.pack(fill='x', padx=10, pady=5)
+        
+        tk.Label(data_source_frame, text="Data Source:", 
+                font=self.normal_font, fg='#ffffff', bg='#2d2d2d').pack(side='left')
+        
+        self.data_source_var = tk.StringVar(value="Excel File")
+        data_source_combo = ttk.Combobox(data_source_frame, textvariable=self.data_source_var,
+                                        values=['Excel File', 'CSV File', 'Historical Data'], 
+                                        state='readonly', width=15)
+        data_source_combo.pack(side='left', padx=10)
+        
+        # 文件路徑選擇
+        file_frame = tk.Frame(control_frame, bg='#2d2d2d')
+        file_frame.pack(fill='x', padx=10, pady=5)
+        
+        tk.Label(file_frame, text="Data File:", 
+                font=self.normal_font, fg='#ffffff', bg='#2d2d2d').pack(side='left')
+        
+        self.file_path_var = tk.StringVar(value="fake_fx_data.xlsx")
+        file_entry = tk.Entry(file_frame, textvariable=self.file_path_var,
+                             font=self.normal_font, width=30)
+        file_entry.pack(side='left', padx=5)
+        
+        browse_btn = tk.Button(file_frame, text="Browse", command=self.browse_file,
+                              bg='#0066cc', fg='white', font=self.normal_font)
+        browse_btn.pack(side='left', padx=5)
+        
+        # 控制按鈕
+        button_frame = tk.Frame(control_frame, bg='#2d2d2d')
+        button_frame.pack(fill='x', padx=10, pady=10)
+        
+        self.start_btn = tk.Button(button_frame, text="▶️ Start 90-Day Simulation",
+                                  command=self.start_simulation,
+                                  bg='#00aa00', fg='white', font=self.normal_font, width=20)
+        self.start_btn.pack(side='left', padx=5)
+        
+        self.stop_btn = tk.Button(button_frame, text="⏹️ Stop Simulation",
+                                 command=self.stop_simulation,
+                                 bg='#aa0000', fg='white', font=self.normal_font, width=15,
+                                 state='disabled')
+        self.stop_btn.pack(side='left', padx=5)
+        
+        self.export_btn = tk.Button(button_frame, text="💾 Export Results",
+                                   command=self.export_results,
+                                   bg='#0066cc', fg='white', font=self.normal_font, width=15)
+        self.export_btn.pack(side='left', padx=5)
+        
+        # 進度條
+        progress_frame = tk.Frame(control_frame, bg='#2d2d2d')
+        progress_frame.pack(fill='x', padx=10, pady=5)
+        
+        tk.Label(progress_frame, text="Progress:", 
+                font=self.normal_font, fg='#ffffff', bg='#2d2d2d').pack(side='left')
+        
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(progress_frame, variable=self.progress_var,
+                                          maximum=90, length=400)
+        self.progress_bar.pack(side='left', padx=10)
+        
+        self.progress_label = tk.Label(progress_frame, text="0/90 days",
+                                     font=self.normal_font, fg='#ffffff', bg='#2d2d2d')
+        self.progress_label.pack(side='left', padx=10)
+        
+    def browse_file(self):
+        """瀏覽文件"""
+        from tkinter import filedialog
+        
+        data_source = self.data_source_var.get()
+        if data_source == "Excel File":
+            filetypes = [("Excel files", "*.xlsx *.xls")]
+        elif data_source == "CSV File":
+            filetypes = [("CSV files", "*.csv")]
+        else:
+            filetypes = [("All files", "*.*")]
+            
+        filename = filedialog.askopenfilename(
+            title="Select Data File",
+            filetypes=filetypes
+        )
+        
+        if filename:
+            self.file_path_var.set(filename)
+            
+    def create_detailed_data_panel(self, parent):
+        """創建詳細數據顯示面板"""
+        data_frame = tk.LabelFrame(parent, text="📊 Real-time Trading Data", 
+                                  font=self.header_font, fg='#00ff88', bg='#2d2d2d')
+        data_frame.pack(fill='both', expand=True, padx=10, pady=5)
+        
+        # 創建滾動文本區域
+        self.data_text = scrolledtext.ScrolledText(
+            data_frame, 
+            font=self.small_font,
+            bg='#1e1e1e', 
+            fg='#ffffff',
+            insertbackground='white',
+            selectbackground='#0066cc',
+            wrap=tk.WORD,
+            height=25
+        )
+        self.data_text.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        # 設置文字顏色標籤
+        self.data_text.tag_configure("day_header", foreground="#00ff88", font=('Arial', 11, 'bold'))
+        self.data_text.tag_configure("currency_header", foreground="#ffaa00", font=('Arial', 10, 'bold'))
+        self.data_text.tag_configure("profit", foreground="#00ff88")
+        self.data_text.tag_configure("loss", foreground="#ff6666")
+        self.data_text.tag_configure("neutral", foreground="#ffffff")
+        self.data_text.tag_configure("final_results", foreground="#00ffff", font=('Arial', 12, 'bold'))
+        
+    def create_charts_panel(self, parent):
+        """創建圖表面板"""
+        charts_frame = tk.LabelFrame(parent, text="📈 Trading Charts", 
+                                    font=self.header_font, fg='#00ff88', bg='#2d2d2d')
+        charts_frame.pack(fill='both', expand=True, padx=10, pady=5)
+        
+        # 創建matplotlib圖表
+        self.fig = Figure(figsize=(8, 10), facecolor='#2d2d2d')
+        self.fig.suptitle('90-Day Trading Simulation', color='white', fontsize=12)
+        
+        # 三個子圖，每個貨幣對一個
+        self.axes = {}
+        currency_pairs = ['USD/JPY', 'USD/EUR', 'USD/GBP']
+        
+        for i, pair in enumerate(currency_pairs):
+            ax = self.fig.add_subplot(3, 1, i+1)
+            ax.set_facecolor('#1e1e1e')
+            ax.tick_params(colors='white', labelsize=8)
+            ax.set_ylabel(f'{pair}', color='white', fontsize=9)
+            ax.grid(True, alpha=0.3)
+            self.axes[pair] = ax
+        
+        self.canvas = FigureCanvasTkAgg(self.fig, charts_frame)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(fill='both', expand=True, padx=5, pady=5)
+        
+    def load_historical_data(self):
+        """載入歷史數據"""
+        try:
+            file_path = self.file_path_var.get()
+            data_source = self.data_source_var.get()
+            
+            self.data_text.insert(tk.END, f"📂 Loading data from: {file_path}\n", "day_header")
+            self.data_text.see(tk.END)
+            
+            if data_source == "Excel File":
+                df = pd.read_excel(file_path)
+            elif data_source == "CSV File":
+                df = pd.read_csv(file_path)
+            else:
+                # 嘗試自動檢測文件格式
+                if file_path.endswith('.xlsx') or file_path.endswith('.xls'):
+                    df = pd.read_excel(file_path)
+                elif file_path.endswith('.csv'):
+                    df = pd.read_csv(file_path)
+                else:
+                    raise ValueError("Unsupported file format")
+            
+            self.data_text.insert(tk.END, f"✅ Data loaded successfully: {df.shape[0]} rows, {df.shape[1]} columns\n", "profit")
+            self.data_text.insert(tk.END, f"📊 Columns: {list(df.columns)}\n", "neutral")
+            
+            # 檢查必要的列是否存在
+            required_columns = ['USDJPY', 'USDEUR', 'USDGBP']
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            
+            if missing_columns:
+                self.data_text.insert(tk.END, f"❌ Missing columns: {missing_columns}\n", "loss")
+                messagebox.showerror("Data Error", f"Missing required columns: {missing_columns}")
+                return None
+            
+            # 轉換為numpy陣列格式 (3, N)
+            fx_rates = np.array([
+                df['USDJPY'].values,
+                df['USDEUR'].values,
+                df['USDGBP'].values
+            ])
+            
+            self.data_text.insert(tk.END, f"📈 FX rates shape: {fx_rates.shape}\n", "neutral")
+            self.data_text.insert(tk.END, f"📅 Data range: {len(fx_rates[0])} days\n", "neutral")
+            
+            # 顯示數據預覽
+            self.data_text.insert(tk.END, "\n📋 Data Preview (first 5 days):\n", "currency_header")
+            for i, pair in enumerate(['USD/JPY', 'USD/EUR', 'USD/GBP']):
+                preview_data = fx_rates[i][:5]
+                self.data_text.insert(tk.END, f"{pair}: {preview_data}\n", "neutral")
+            
+            self.data_text.insert(tk.END, "\n", "neutral")
+            self.data_text.see(tk.END)
+            
+            return fx_rates
+            
+        except FileNotFoundError:
+            error_msg = f"File not found: {file_path}"
+            self.data_text.insert(tk.END, f"❌ {error_msg}\n", "loss")
+            messagebox.showerror("File Error", error_msg)
+            return None
+            
+        except Exception as e:
+            error_msg = f"Error loading data: {str(e)}"
+            self.data_text.insert(tk.END, f"❌ {error_msg}\n", "loss")
+            messagebox.showerror("Data Error", error_msg)
+            return None
+            
+    def start_simulation(self):
+        """開始模擬"""
+        if self.simulation_running:
+            return
+            
+        # 首先載入歷史數據
+        fx_rates = self.load_historical_data()
+        if fx_rates is None:
+            return
+            
+        # 檢查數據長度是否足夠
+        if fx_rates.shape[1] < 120:  # 至少需要120天數據
+            messagebox.showerror("Data Error", 
+                               f"Insufficient data. Need at least 120 days, got {fx_rates.shape[1]} days")
+            return
+            
+        self.simulation_running = True
+        self.start_btn.config(state='disabled')
+        self.stop_btn.config(state='normal')
+        
+        # 清空之前的模擬數據
+        self.data_text.insert(tk.END, "\n🚀 Starting 90-Day AI Trading Simulation...\n\n", "day_header")
+        
+        # 重置進度
+        self.progress_var.set(0)
+        self.progress_label.config(text="0/90 days")
+        
+        # 儲存歷史數據供模擬使用
+        self.historical_fx_rates = fx_rates
+        
+        # 在新線程中運行模擬
+        self.simulation_thread = threading.Thread(target=self.run_simulation)
+        self.simulation_thread.daemon = True
+        self.simulation_thread.start()
+        
+    def stop_simulation(self):
+        """停止模擬"""
+        self.simulation_running = False
+        self.start_btn.config(state='normal')
+        self.stop_btn.config(state='disabled')
+        
+    def run_simulation(self):
+        """運行90天模擬"""
+        try:
+            # 使用載入的歷史數據創建FXTrading實例
+            self.fx_trading = self.create_fx_trading_instance()
+            
+            # 運行90天模擬
+            for day in range(90):
+                if not self.simulation_running:
+                    break
+                    
+                # 更新模擬一天
+                self.simulate_one_day(day)
+                
+                # 每天都顯示詳細數據
+                self.window.after(0, self.display_day_data, day + 1)
+                
+                # 更新進度
+                self.window.after(0, self.update_progress, day + 1)
+                
+                # 更新圖表（每5天更新一次以提高性能）
+                if day % 5 == 0 or day == 89:
+                    self.window.after(0, self.update_charts)
+                
+                # 模擬延遲
+                time.sleep(0.05)
+                
+            # 顯示最終結果
+            if self.simulation_running:
+                self.window.after(0, self.display_final_results)
+                
+        except Exception as e:
+            self.window.after(0, lambda: messagebox.showerror("Simulation Error", f"模擬過程中發生錯誤: {str(e)}"))
+        finally:
+            self.simulation_running = False
+            self.window.after(0, lambda: self.start_btn.config(state='normal'))
+            self.window.after(0, lambda: self.stop_btn.config(state='disabled'))
+            
+    def create_fx_trading_instance(self):
+        """使用歷史數據創建FXTrading實例"""
+        try:
+            # 使用前30天作為初始預測數據，後90天作為模擬數據
+            initial_rates = self.historical_fx_rates[:, :30]  # 前30天作為初始預測
+            
+            # 創建FXTrading實例（會自動載入GRU模型）
+            fx_trading = FXTrading(initial_rates, self.historical_fx_rates)
+            
+            return fx_trading
+        except Exception as e:
+            messagebox.showerror("Model Loading Error", 
+                            f"無法載入GRU模型:\n{str(e)}\n\n請確保以下檔案存在於程式目錄中:\n- fx_model_gru.h5\n- scaler.pkl")
+            return None
+
+        
+    def simulate_one_day(self, day):
+        """模擬一天的交易"""
+        # 更新環境
+        self.fx_trading.day = day
+        self.fx_trading.update()
+        
+        
+        # 對每個貨幣對執行交易邏輯
+        for cap_num in range(3):
+            # 檢查強制平倉
+            if self.fx_trading.position_size[cap_num] != 0 and self.fx_trading.check_liquidation(cap_num):
+                self.fx_trading.capital[cap_num] += self.fx_trading.close_position(cap_num, self.fx_trading.now_price[cap_num])
+                self.fx_trading.position_size[cap_num] = 0
+            
+            # 如果沒有持倉，嘗試開新倉
+            if self.fx_trading.position_size[cap_num] == 0 and self.fx_trading.capital[cap_num] > 0:
+                action, num = self.fx_trading.open_position(cap_num, None)
+                if action == 0 and num * self.fx_trading.margin <= self.fx_trading.available_margin[cap_num]:
+                    self.fx_trading.position_size[cap_num] += num
+                    self.fx_trading.entry_price[cap_num] = self.fx_trading.now_price[cap_num]
+                elif action == 1 and num * self.fx_trading.margin <= self.fx_trading.available_margin[cap_num]:
+                    self.fx_trading.entry_price[cap_num] = self.fx_trading.now_price[cap_num]
+                    self.fx_trading.position_size[cap_num] -= num
+            else:
+                # 如果有持倉，決定下一步動作
+                action, num = self.fx_trading.decide_action(None)
+                
+                if action == 0:  # 加倉
+                    self.fx_trading.update_entry_price(cap_num, self.fx_trading.now_price[cap_num], 
+                                                     self.fx_trading.position_size[cap_num], num)
+                    self.fx_trading.position_size[cap_num] += num
+                elif action == 1:  # 平倉
+                    self.fx_trading.capital[cap_num] += self.fx_trading.close_position(cap_num, self.fx_trading.now_price[cap_num])
+                    self.fx_trading.position_size[cap_num] = 0
+                
+                    
+    def display_day_data(self, day):
+        """顯示每日詳細數據"""
+        currency_pairs = ['USD/JPY', 'USD/EUR', 'USD/GBP']
+        
+        # 添加日期標題
+        self.data_text.insert(tk.END, f"Day {day}\n", "day_header")
+        self.data_text.insert(tk.END, " \n", "neutral")
+        
+        # 顯示每個貨幣對的數據
+        for i, pair in enumerate(currency_pairs):
+            self.data_text.insert(tk.END, f"{pair}:\n", "currency_header")
+            
+            # 預測匯率 vs 實際匯率
+            if len(self.fx_trading.Pre_fx_rates[i]) > self.fx_trading.start + day - 1:
+                pred_rate = self.fx_trading.Pre_fx_rates[i][self.fx_trading.start + day - 1]
+            else:
+                pred_rate = self.fx_trading.now_price[i]
+            real_rate = self.fx_trading.now_price[i]
+            self.data_text.insert(tk.END, f"Pre_fx_rate: {pred_rate:.6f} real_fx_rates: {real_rate:.6f}\n", "neutral")
+            
+            # 資本和保證金信息
+            capital = self.fx_trading.capital[i]
+            available_margin = self.fx_trading.available_margin[i]
+            position_size = self.fx_trading.position_size[i]
+            leverage = self.fx_trading.leverage[i]
+            self.data_text.insert(tk.END, f"Capital: {capital:.1f} available_margin: {available_margin:.1f} position_size: {position_size:.1f} leverage: {leverage}\n", "neutral")
+            
+            # 浮動損益和其他信息
+            floating_pnl = self.fx_trading.floating_pnl[i]
+            entry_price = self.fx_trading.entry_price[i]
+            position_value = self.fx_trading.position_value[i]
+            
+            pnl_tag = "profit" if floating_pnl >= 0 else "loss"
+            self.data_text.insert(tk.END, f"floating_pnl: {floating_pnl:.6f} entry_price: {entry_price:.6f} position_value: {position_value:.1f}\n", pnl_tag)
+            self.data_text.insert(tk.END, " \n", "neutral")
+        
+        # 自動滾動到底部
+        self.data_text.see(tk.END)
+        
+    def display_final_results(self):
+        """顯示最終結果"""
+        currency_pairs = ['USD/JPY', 'USD/EUR', 'USD/GBP']
+        
+        # 計算最終資本（包括浮動損益）
+        final_capital = self.fx_trading.capital + self.fx_trading.floating_pnl
+        
+        self.data_text.insert(tk.END, "\n" + "="*50 + "\n", "final_results")
+        self.data_text.insert(tk.END, "Final Results:\n", "final_results")
+        
+        for i, pair in enumerate(currency_pairs):
+            self.data_text.insert(tk.END, f"{pair}: capital {final_capital[i]:.10f}\n", "final_results")
+        
+        # 計算總回報率
+        initial_capital_sum = sum(self.fx_trading.initial_capital)
+        final_capital_sum = sum(final_capital)
+        rate_of_return = final_capital_sum / initial_capital_sum
+        
+        self.data_text.insert(tk.END, f"Rate of Return: {rate_of_return:.10f}\n", "final_results")
+        self.data_text.insert(tk.END, "="*50 + "\n", "final_results")
+        
+        # 自動滾動到底部
+        self.data_text.see(tk.END)
+        
+    def update_progress(self, day):
+        """更新進度條"""
+        self.progress_var.set(day)
+        self.progress_label.config(text=f"{day}/90 days")
+        
+    def update_charts(self):
+        """更新圖表"""
+        if not self.fx_trading:
+            return
+            
+        currency_pairs = ['USD/JPY', 'USD/EUR', 'USD/GBP']
+        
+        for i, pair in enumerate(currency_pairs):
+            ax = self.axes[pair]
+            ax.clear()
+            
+            # 獲取歷史數據
+            current_day = self.fx_trading.day
+            if current_day > 0:
+                days = list(range(1, current_day + 1))
+                actual_prices = []
+                predicted_prices = []
+                
+                for day in range(current_day):
+                    actual_prices.append(self.fx_trading.real_fx_rates[i][self.fx_trading.start + day])
+                    if day < len(self.fx_trading.Pre_fx_rates[i]) - self.fx_trading.start:
+                        predicted_prices.append(self.fx_trading.Pre_fx_rates[i][self.fx_trading.start + day])
+                
+                # 繪製實際價格和預測價格
+                if actual_prices:
+                    ax.plot(days, actual_prices, color='#00ff88', linewidth=2, label='Actual Price')
+                if predicted_prices and len(predicted_prices) == len(days):
+                    ax.plot(days, predicted_prices, color='#ffaa00', linewidth=2, linestyle='--', label='Predicted Price')
+                
+                # 設置圖表樣式
+                ax.set_facecolor('#1e1e1e')
+                ax.tick_params(colors='white', labelsize=8)
+                ax.set_ylabel(f'{pair}', color='white', fontsize=9)
+                ax.grid(True, alpha=0.3)
+                ax.legend(fontsize=8)
+        
+        self.fig.tight_layout()
+        self.canvas.draw()
+        
+    def export_results(self):
+        """匯出結果"""
+        if not self.fx_trading:
+            messagebox.showwarning("No Data", "沒有可匯出的模擬數據")
+            return
+            
+        try:
+            # 獲取文本內容
+            content = self.data_text.get(1.0, tk.END)
+            
+            # 儲存為文本文件
+            filename = f"simulation_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            messagebox.showinfo("Export Success", f"結果已匯出至: {filename}")
+            
+        except Exception as e:
+            messagebox.showerror("Export Error", f"匯出失敗: {str(e)}")
+
+# 需要在final.ipynb中的FXTrading類基礎上進行的修改
+class FXTrading:
+    def __init__(self, fx_rates, real_fx_rates):
+        """
+        fx_rates: shape (3, N) → 初始預測匯率
+        real_fx_rates: shape (3, N) → 所有實際匯率資料
+        """
+        self.Pre_fx_rates = fx_rates.copy()
+        self.real_fx_rates = real_fx_rates
+        self.day = 0
+        self.start = len(fx_rates[0]) - 30 - 1  # 模擬起始點
+
+        self.initial_capital = np.array([1000, 1000, 1000], dtype=float)
+        self.capital = np.array([1000, 1000, 1000], dtype=float)
+        self.available_margin = self.capital.copy()
+
+        self.leverage = np.array([5, 5, 5])
+        self.position_size = np.array([0, 0, 0], dtype=float)
+        self.position_value = np.array([0, 0, 0], dtype=float)
+        self.floating_pnl = np.array([0, 0, 0], dtype=float)
+
+        self.now_price = np.array([
+            real_fx_rates[0][self.start],
+            real_fx_rates[1][self.start],
+            real_fx_rates[2][self.start]
+        ], dtype=float)
+
+        self.entry_price = np.array([0, 0, 0], dtype=float)
+        self.margin = 10
+        
+        # ❶ 載入訓練好的模型與 scaler
+        try:
+            self.model = load_model("fx_model_gru.h5", compile=False)
+            self.scaler = joblib.load("scaler.pkl")
+            self.window_size = 30  # 必須和訓練時一致
+            print("✅ 成功載入訓練好的GRU模型和scaler")
+        except Exception as e:
+            print(f"❌ 載入模型失敗: {e}")
+            print("請確保 fx_model_gru.h5 和 scaler.pkl 檔案存在於當前目錄")
+            raise
+
+    def predict_fx_rate(self, data=None):
+        """
+        使用訓練好的 GRU 模型預測下一日三種匯率，並更新 self.Pre_fx_rates。
+        """
+        try:
+            # 檢查是否有足夠的歷史數據
+            if self.start + self.day < self.window_size:
+                print(f"Warning: Not enough historical data for prediction at day {self.day}")
+                return
+            
+            # 檢查是否超出real_fx_rates範圍
+            if self.start + self.day >= len(self.real_fx_rates[0]):
+                print(f"Warning: Exceeded real_fx_rates range at day {self.day}")
+                return
+            
+            # ❷ 取得最近 window_size 天的實際匯率（格式 shape: (30, 3)）
+            recent_days = []
+            start_idx = max(0, self.start + self.day - self.window_size)
+            end_idx = self.start + self.day
+            
+            for i in range(start_idx, end_idx):
+                if i < len(self.real_fx_rates[0]):
+                    recent_days.append([
+                        self.real_fx_rates[0][i],
+                        self.real_fx_rates[1][i],
+                        self.real_fx_rates[2][i]
+                    ])
+            
+            # 如果數據不足30天，用最早的數據填充
+            while len(recent_days) < self.window_size:
+                if recent_days:
+                    recent_days.insert(0, recent_days[0])
+                else:
+                    # 使用初始價格
+                    recent_days.append([
+                        self.real_fx_rates[0][0],
+                        self.real_fx_rates[1][0],
+                        self.real_fx_rates[2][0]
+                    ])
+            
+            recent_days = np.array(recent_days[-self.window_size:])  # 確保只取最近30天
+            
+            # ❸ 正規化
+            scaled_input = self.scaler.transform(recent_days)
+            scaled_input = scaled_input.reshape(1, self.window_size, 3)  # shape: (1, 30, 3)
+            
+            # ❹ 預測並還原
+            scaled_pred = self.model.predict(scaled_input, verbose=0)[0]  # shape: (3,)
+            real_pred = self.scaler.inverse_transform([scaled_pred])[0]  # shape: (3,)
+            
+            # ❺ 更新 self.Pre_fx_rates - 修正索引問題
+            target_idx = self.start + self.day
+            
+            # 如果Pre_fx_rates不夠長，擴展它
+            while len(self.Pre_fx_rates[0]) <= target_idx:
+                # 用最後一個預測值填充
+                last_pred = self.Pre_fx_rates[:, -1].reshape(3, 1)
+                self.Pre_fx_rates = np.concatenate([self.Pre_fx_rates, last_pred], axis=1)
+            
+            # 更新預測值
+            self.Pre_fx_rates[:, target_idx] = real_pred
+            
+        except Exception as e:
+            print(f"Prediction error at day {self.day}: {e}")
+            # 使用前一天的預測值作為備用
+            if len(self.Pre_fx_rates[0]) > self.start + self.day - 1:
+                prev_pred = self.Pre_fx_rates[:, self.start + self.day - 1]
+                if len(self.Pre_fx_rates[0]) <= self.start + self.day:
+                    self.Pre_fx_rates = np.concatenate([self.Pre_fx_rates, prev_pred.reshape(3, 1)], axis=1)
+
+    def open_position(self, cap_num, any):
+        """
+        Decide how to open a position based on predicted vs. current price.
+        """
+        target_idx = self.start + self.day
+        
+        # 檢查索引是否有效
+        if target_idx >= len(self.Pre_fx_rates[cap_num]):
+            print(f"Warning: Prediction index {target_idx} out of range, using last available prediction")
+            predicted_price = self.Pre_fx_rates[cap_num][-1]
+        else:
+            predicted_price = self.Pre_fx_rates[cap_num][target_idx]
+        
+        current_price = self.now_price[cap_num]
+        
+        # 增加閾值以避免過於頻繁的交易
+        threshold = 0.001  # 0.1%的閾值
+        
+        if predicted_price > current_price * (1 + threshold):
+            return 0, 10  # LONG
+        elif predicted_price < current_price * (1 - threshold):
+            return 1, 10  # SHORT
+        else:
+            return 2, 0  # HOLD
+
+    def decide_action(self, any):
+        """決定持倉操作"""
+        actions = []
+        
+        for cap_num in range(3):
+            target_idx = self.start + self.day
+            
+            if target_idx >= len(self.Pre_fx_rates[cap_num]):
+                actions.append((2, 0))
+                continue
+                
+            predicted_price = self.Pre_fx_rates[cap_num][target_idx]
+            current_price = self.now_price[cap_num]
+            pos = self.position_size[cap_num]
+            pnl = self.floating_pnl[cap_num]
+
+            # 止盈止損邏輯
+            if pnl > 100 or pnl < -100:
+                actions.append((1, abs(pos)))  # CLOSE
+                continue
+
+            # 預測方向與持倉方向相反時平倉
+            threshold = 0.001
+            if (pos > 0 and predicted_price < current_price * (1 - threshold)) or \
+               (pos < 0 and predicted_price > current_price * (1 + threshold)):
+                actions.append((1, abs(pos)))  # CLOSE
+                continue
+
+            actions.append((2, 0))  # HOLD
+
+        return actions[self.day % 3] if actions else (2, 0)
+
+    def check_liquidation(self, cap_num, maintenance_margin_ratio_threshold=0.3):
+        """檢查是否需要強制平倉"""
+        if self.position_size[cap_num] == 0:
+            return False
+        equity = self.capital[cap_num] + self.floating_pnl[cap_num]
+        used_margin = abs(self.position_size[cap_num]) * self.margin
+        if used_margin == 0:
+            return False
+        return equity / used_margin < maintenance_margin_ratio_threshold
+
+    def close_position(self, cap_num, close_price):
+        """平倉並計算實現損益"""
+        if self.position_size[cap_num] == 0 or self.entry_price[cap_num] == 0:
+            return 0
+        return (close_price - self.entry_price[cap_num]) * self.position_size[cap_num] * self.margin * self.leverage[cap_num] / close_price
+
+    def update_entry_price(self, cap_num, add_price, old_position, add_position):
+        """更新平均進場價格"""
+        if old_position == 0:
+            self.entry_price[cap_num] = add_price
+            return
+            
+        old_value = abs(old_position) * self.margin * self.leverage[cap_num]
+        add_value = abs(add_position) * self.margin * self.leverage[cap_num]
+        
+        if old_value + add_value > 0:
+            self.entry_price[cap_num] = (self.entry_price[cap_num] * old_value + add_price * add_value) / (old_value + add_value)
+
+    def update(self):
+        """更新環境狀態"""
+        if self.start + self.day < len(self.real_fx_rates[0]):
+            self.now_price = np.array([
+                self.real_fx_rates[0][self.start + self.day],
+                self.real_fx_rates[1][self.start + self.day],
+                self.real_fx_rates[2][self.start + self.day]
+            ])
+
+        self.available_margin = self.capital - abs(self.position_size) * self.margin
+        self.position_value = abs(self.margin * self.position_size * self.leverage)
+        
+        # 計算浮動損益
+        for i in range(3):
+            if self.position_size[i] != 0 and self.entry_price[i] != 0:
+                self.floating_pnl[i] = self.position_size[i] * (self.now_price[i] - self.entry_price[i]) * self.leverage[i] * self.margin / self.now_price[i]
+            else:
+                self.floating_pnl[i] = 0
+
+
 class FreeWeatherProvider:
     """免費天氣資料提供者"""
     
@@ -584,7 +1328,17 @@ class ForexTradingGUI:
         
         # Account information
         self.create_account_panel(parent)
-        
+
+        # 新增90天模擬按鈕
+        simulate_btn = tk.Button(button_frame, text="🔮 90-Day Simulation", 
+                            command=self.open_simulation_window,
+                            bg='#9900cc', fg='white', font=self.header_font, width=30)
+        simulate_btn.pack(side='left', padx=5)
+
+    def open_simulation_window(self):
+        """開啟90天模擬視窗"""
+        simulation_window = SimulationWindow(self.root, self)
+
     def create_account_panel(self, parent):
         """Create enhanced account information panel"""
         account_frame = tk.LabelFrame(parent, text="💰 Advanced Account Information", font=self.header_font,
