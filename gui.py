@@ -747,42 +747,121 @@ class FXTrading:
         predictions = []
         
         for i in range(3):
-            if i not in self.models['transformer_lstm']:
-                predictions.append(self.real_fx_rates[i][self.start + self.day - 1])
+            if i not in self.models['transformer_lstm'] or self.models['transformer_lstm'][i] is None:
+                # 如果模型不存在，使用最後一個已知價格
+                if self.start + self.day > 0:
+                    predictions.append(self.real_fx_rates[i][self.start + self.day - 1])
+                else:
+                    predictions.append(self.real_fx_rates[i][0])
                 continue
                 
             try:
-                # 取得歷史數據
-                if self.start + self.day < 60:
+                # 修正數據範圍計算邏輯
+                current_idx = self.start + self.day
+                
+                # 確保 current_idx 不超出數據範圍
+                if current_idx >= len(self.real_fx_rates[i]):
+                    current_idx = len(self.real_fx_rates[i]) - 1
+                
+                # 取得歷史數據 - 修正邏輯
+                if current_idx < 60:
+                    # 如果當前位置不足60天，從開始取到當前位置
                     start_idx = 0
-                    end_idx = self.start + self.day
+                    end_idx = max(1, current_idx)  # 確保至少有1個數據點
                 else:
-                    start_idx = self.start + self.day - 60
-                    end_idx = self.start + self.day
+                    # 如果有足夠數據，取最近60天
+                    start_idx = current_idx - 60
+                    end_idx = current_idx
+                
+                # 檢查數據範圍是否有效
+                if end_idx <= start_idx or end_idx > len(self.real_fx_rates[i]) or start_idx < 0:
+                    print(f"數據範圍無效: start_idx={start_idx}, end_idx={end_idx}, 數據長度={len(self.real_fx_rates[i])}")
+                    # 使用備用預測
+                    if current_idx > 0:
+                        predictions.append(self.real_fx_rates[i][current_idx - 1])
+                    else:
+                        predictions.append(self.real_fx_rates[i][0])
+                    continue
                 
                 price_data = self.real_fx_rates[i][start_idx:end_idx]
+                
+                # 檢查 price_data 是否為空
+                if len(price_data) == 0:
+                    print(f"價格數據為空，使用備用預測")
+                    if current_idx > 0:
+                        predictions.append(self.real_fx_rates[i][current_idx - 1])
+                    else:
+                        predictions.append(self.real_fx_rates[i][0])
+                    continue
+                
                 features = self.create_features(price_data)
                 
-                if len(features) < 60:
-                    padding = np.tile(features[0], (60 - len(features), 1))
-                    features = np.vstack([padding, features])
-                elif len(features) > 60:
-                    features = features[-60:]
+                # 檢查 features 是否為空
+                if features is None or len(features) == 0:
+                    print(f"特徵數據為空，使用備用預測")
+                    if current_idx > 0:
+                        predictions.append(self.real_fx_rates[i][current_idx - 1])
+                    else:
+                        predictions.append(self.real_fx_rates[i][0])
+                    continue
+                
+                # 調整特徵數據長度到60
+                target_length = 60
+                if len(features) < target_length:
+                    # 如果特徵數據不足，重複最後一行來填充
+                    if len(features) > 0:
+                        last_row = features[-1:] if len(features.shape) > 1 else features.reshape(1, -1)
+                        padding_needed = target_length - len(features)
+                        padding = np.tile(last_row, (padding_needed, 1))
+                        features = np.vstack([features, padding])
+                    else:
+                        # 如果完全沒有特徵，創建默認特徵
+                        features = np.zeros((target_length, 11))
+                        features[:, 0] = price_data[-1] if len(price_data) > 0 else 1.0
+                elif len(features) > target_length:
+                    # 如果數據過多，取最後的部分
+                    features = features[-target_length:]
+                
+                # 檢查 scaler 是否存在
+                if self.scalers['transformer_lstm'][i] is None:
+                    from sklearn.preprocessing import MinMaxScaler
+                    self.scalers['transformer_lstm'][i] = MinMaxScaler()
+                
+                # 確保特徵形狀正確
+                if len(features.shape) == 1:
+                    features = features.reshape(-1, 1)
                 
                 scaled_input = self.scalers['transformer_lstm'][i].fit_transform(features)
-                scaled_input = torch.tensor(scaled_input.reshape(1, 60, -1), dtype=torch.float32)
+                scaled_input = torch.tensor(scaled_input.reshape(1, target_length, -1), dtype=torch.float32)
                 
                 with torch.no_grad():
                     scaled_pred = self.models['transformer_lstm'][i](scaled_input).cpu().numpy()[0, 0]
                 
-                pred_price = scaled_pred * (np.max(price_data) - np.min(price_data)) + np.min(price_data)
+                # 確保 price_data 不為空
+                if len(price_data) > 0:
+                    price_range = np.max(price_data) - np.min(price_data)
+                    if price_range > 0:
+                        pred_price = scaled_pred * price_range + np.min(price_data)
+                    else:
+                        pred_price = np.mean(price_data)
+                else:
+                    pred_price = self.real_fx_rates[i][current_idx - 1] if current_idx > 0 else self.real_fx_rates[i][0]
+                
                 predictions.append(pred_price)
                 
             except Exception as e:
                 print(f"Transformer-LSTM預測失敗: {e}")
-                predictions.append(self.real_fx_rates[i][self.start + self.day - 1])
+                # 使用備用預測
+                current_idx = self.start + self.day
+                if current_idx > 0 and current_idx < len(self.real_fx_rates[i]):
+                    predictions.append(self.real_fx_rates[i][current_idx - 1])
+                elif len(self.real_fx_rates[i]) > 0:
+                    predictions.append(self.real_fx_rates[i][0])
+                else:
+                    predictions.append(1.0)  # 最後的備用值
         
         return np.array(predictions)
+
 
     def predict_fx_rate(self, data=None):
         """同時使用兩個模型進行預測"""
@@ -849,9 +928,24 @@ class FXTrading:
         return real_pred
     
     def create_features(self, price_data):
-        """
-        從價格數據創建技術指標特徵
-        """
+        """從價格數據創建技術指標特徵"""
+        # 檢查輸入數據
+        if price_data is None or len(price_data) == 0:
+            print("價格數據為空，返回默認特徵")
+            return np.zeros((1, 11))
+        
+        # 確保 price_data 是 numpy array
+        if not isinstance(price_data, np.ndarray):
+            price_data = np.array(price_data)
+        
+        # 如果只有一個數據點，創建簡化特徵
+        if len(price_data) == 1:
+            features = np.zeros((1, 11))
+            features[0, 0] = price_data[0]  # Close price
+            for i in range(1, 11):
+                features[0, i] = price_data[0]  # 其他特徵用價格填充
+            return features
+        
         if len(price_data) < 50:
             # 如果數據不足，創建簡化特徵
             features = np.zeros((len(price_data), 11))
@@ -859,37 +953,59 @@ class FXTrading:
             for i in range(1, 11):
                 features[:, i] = price_data  # 其他特徵暫時用價格填充
             return features
-        
-        df = pd.DataFrame({
-            'Close': price_data,
-            'High': price_data,
-            'Low': price_data,
-            'Open': price_data
-        })
-        
-        # 計算技術指標
-        df['MA10'] = df['Close'].rolling(10, min_periods=1).mean()
-        df['MA50'] = df['Close'].rolling(50, min_periods=1).mean()
-        df['EMA10'] = df['Close'].ewm(span=10).mean()
-        df['EMA50'] = df['Close'].ewm(span=50).mean()
-        df['STD20'] = df['Close'].rolling(20, min_periods=1).std()
-        df['Bollinger_High'] = df['MA10'] + 2 * df['STD20']
-        df['Bollinger_Low'] = df['MA10'] - 2 * df['STD20']
-        df['Bollinger_Width'] = df['Bollinger_High'] - df['Bollinger_Low']
-        
-        # RSI simplify
-        pct_change = df['Close'].pct_change()
-        df['RSI'] = 50 + pct_change.rolling(14, min_periods=1).mean() * 100
-        
-        df['MOM'] = df['Close'].diff(10).fillna(0)
-        df['MACD'] = df['EMA10'] - df['EMA50']
-        df['ATR'] = df['Close'].diff().abs().rolling(14, min_periods=1).mean()
-        
-        # 選擇特徵
-        features = ['Close', 'MA10', 'MA50', 'EMA10', 'EMA50', 'STD20',
-                   'Bollinger_Width', 'RSI', 'MOM', 'MACD', 'ATR']
-        
-        return df[features].ffill().bfill().values
+
+        try:
+            df = pd.DataFrame({
+                'Close': price_data,
+                'High': price_data,
+                'Low': price_data,
+                'Open': price_data
+            })
+
+            # 計算技術指標
+            df['MA10'] = df['Close'].rolling(10, min_periods=1).mean()
+            df['MA50'] = df['Close'].rolling(50, min_periods=1).mean()
+            df['EMA10'] = df['Close'].ewm(span=10, min_periods=1).mean()
+            df['EMA50'] = df['Close'].ewm(span=50, min_periods=1).mean()
+            df['STD20'] = df['Close'].rolling(20, min_periods=1).std().fillna(0)
+            df['Bollinger_High'] = df['MA10'] + 2 * df['STD20']
+            df['Bollinger_Low'] = df['MA10'] - 2 * df['STD20']
+            df['Bollinger_Width'] = df['Bollinger_High'] - df['Bollinger_Low']
+
+            # RSI simplify
+            pct_change = df['Close'].pct_change().fillna(0)
+            df['RSI'] = 50 + pct_change.rolling(14, min_periods=1).mean() * 100
+            df['MOM'] = df['Close'].diff(10).fillna(0)
+            df['MACD'] = df['EMA10'] - df['EMA50']
+            df['ATR'] = df['Close'].diff().abs().rolling(14, min_periods=1).mean().fillna(0)
+
+            # 選擇特徵
+            features = ['Close', 'MA10', 'MA50', 'EMA10', 'EMA50', 'STD20',
+                        'Bollinger_Width', 'RSI', 'MOM', 'MACD', 'ATR']
+            
+            result = df[features].fillna(method='ffill').fillna(method='bfill').fillna(0).values
+            
+            # 檢查結果是否為空
+            if result is None or len(result) == 0:
+                print("技術指標計算結果為空，返回默認特徵")
+                features_array = np.zeros((len(price_data), 11))
+                features_array[:, 0] = price_data
+                for i in range(1, 11):
+                    features_array[:, i] = price_data
+                return features_array
+            
+            return result
+            
+        except Exception as e:
+            print(f"技術指標計算失敗: {e}")
+            # 返回簡化特徵
+            features = np.zeros((len(price_data), 11))
+            features[:, 0] = price_data
+            for i in range(1, 11):
+                features[:, i] = price_data
+            return features
+
+
     
     def open_position(self, cap_num, any):
         """
