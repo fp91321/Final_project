@@ -362,7 +362,8 @@ class SimulationWindow:
                 self.window.after(0, self.display_final_results)
                 
         except Exception as e:
-            self.window.after(0, lambda: messagebox.showerror("Simulation Error", f"模擬過程中發生錯誤: {str(e)}"))
+            error_msg = str(e)  # 立即獲取錯誤訊息
+            self.window.after(0, lambda: messagebox.showerror("Simulation Error", f"模擬過程中發生錯誤: {error_msg}"))
         finally:
             self.simulation_running = False
             self.window.after(0, lambda: self.start_btn.config(state='normal'))
@@ -385,39 +386,44 @@ class SimulationWindow:
 
         
     def simulate_one_day(self, day):
-        """模擬一天的交易"""
-        # 更新環境
+        """模擬一天的交易 - 與final.ipynb完全一致"""
         self.fx_trading.day = day
         self.fx_trading.update()
-        
-        
-        # 對每個貨幣對執行交易邏輯
+        self.fx_trading.predict_fx_rate(None)
+
+        # Main trading loop for each currency
         for cap_num in range(3):
-            # 檢查強制平倉
+            # Check for liquidation first
             if self.fx_trading.position_size[cap_num] != 0 and self.fx_trading.check_liquidation(cap_num):
+                print("Liquidation triggered!")
                 self.fx_trading.capital[cap_num] += self.fx_trading.close_position(cap_num, self.fx_trading.now_price[cap_num])
                 self.fx_trading.position_size[cap_num] = 0
-            
-            # 如果沒有持倉，嘗試開新倉
+
+            # If no position, try to open new position
             if self.fx_trading.position_size[cap_num] == 0 and self.fx_trading.capital[cap_num] > 0:
                 action, num = self.fx_trading.open_position(cap_num, None)
-                if action == 0 and num * self.fx_trading.margin <= self.fx_trading.available_margin[cap_num]:
-                    self.fx_trading.position_size[cap_num] += num
+                if action == 0 and num * self.fx_trading.margin <= self.fx_trading.available_margin[cap_num]:  # LONG
+                    self.fx_trading.position_size[cap_num] = num
                     self.fx_trading.entry_price[cap_num] = self.fx_trading.now_price[cap_num]
-                elif action == 1 and num * self.fx_trading.margin <= self.fx_trading.available_margin[cap_num]:
+                elif action == 1 and num * self.fx_trading.margin <= self.fx_trading.available_margin[cap_num]:  # SHORT
+                    self.fx_trading.position_size[cap_num] = -num
                     self.fx_trading.entry_price[cap_num] = self.fx_trading.now_price[cap_num]
-                    self.fx_trading.position_size[cap_num] -= num
             else:
-                # 如果有持倉，決定下一步動作
+                # If position exists, decide what to do
                 action, num = self.fx_trading.decide_action(None)
-                
-                if action == 0:  # 加倉
-                    self.fx_trading.update_entry_price(cap_num, self.fx_trading.now_price[cap_num], 
-                                                     self.fx_trading.position_size[cap_num], num)
-                    self.fx_trading.position_size[cap_num] += num
-                elif action == 1:  # 平倉
+
+                if action == 0:  # ADD position
+                    if self.fx_trading.position_size[cap_num] > 0:  # 多頭加倉
+                        self.fx_trading.update_entry_price(cap_num, self.fx_trading.now_price[cap_num], self.fx_trading.position_size[cap_num], num)
+                        self.fx_trading.position_size[cap_num] += num
+                    else:  # 空頭加倉
+                        self.fx_trading.update_entry_price(cap_num, self.fx_trading.now_price[cap_num], self.fx_trading.position_size[cap_num], -num)
+                        self.fx_trading.position_size[cap_num] -= num
+                elif action == 1:  # CLOSE position
                     self.fx_trading.capital[cap_num] += self.fx_trading.close_position(cap_num, self.fx_trading.now_price[cap_num])
                     self.fx_trading.position_size[cap_num] = 0
+
+
                 
                     
     def display_day_data(self, day):
@@ -460,28 +466,28 @@ class SimulationWindow:
         self.data_text.see(tk.END)
         
     def display_final_results(self):
-        """顯示最終結果"""
-        currency_pairs = ['USD/JPY', 'USD/EUR', 'USD/GBP']
+        """顯示最終結果 - 與final.ipynb完全一致"""
+        # Final update after run - 與final.ipynb一致
+        self.fx_trading.capital += self.fx_trading.position_size * (self.fx_trading.now_price - self.fx_trading.entry_price) * self.fx_trading.leverage * self.fx_trading.margin / self.fx_trading.now_price
         
-        # 計算最終資本（包括浮動損益）
-        final_capital = self.fx_trading.capital + self.fx_trading.floating_pnl
+        currency_pairs = ['USD/JPY', 'USD/EUR', 'USD/GBP']
         
         self.data_text.insert(tk.END, "\n" + "="*50 + "\n", "final_results")
         self.data_text.insert(tk.END, "Final Results:\n", "final_results")
         
         for i, pair in enumerate(currency_pairs):
-            self.data_text.insert(tk.END, f"{pair}: capital {final_capital[i]:.10f}\n", "final_results")
+            self.data_text.insert(tk.END, f"{pair}: capital {self.fx_trading.capital[i]}\n", "final_results")
         
         # 計算總回報率
         initial_capital_sum = sum(self.fx_trading.initial_capital)
-        final_capital_sum = sum(final_capital)
+        final_capital_sum = sum(self.fx_trading.capital)
         rate_of_return = final_capital_sum / initial_capital_sum
         
-        self.data_text.insert(tk.END, f"Rate of Return: {rate_of_return:.10f}\n", "final_results")
+        self.data_text.insert(tk.END, f"Rate of Return: {rate_of_return}\n", "final_results")
         self.data_text.insert(tk.END, "="*50 + "\n", "final_results")
         
-        # 自動滾動到底部
         self.data_text.see(tk.END)
+
         
     def update_progress(self, day):
         """更新進度條"""
@@ -590,140 +596,86 @@ class FXTrading:
 
     def predict_fx_rate(self, data=None):
         """
-        使用訓練好的 GRU 模型預測下一日三種匯率，並更新 self.Pre_fx_rates。
+        使用 GRU 模型預測下一日三種匯率，並更新 self.Pre_fx_rates。
         """
-        try:
-            # 檢查是否有足夠的歷史數據
-            if self.start + self.day < self.window_size:
-                print(f"Warning: Not enough historical data for prediction at day {self.day}")
-                return
-            
-            # 檢查是否超出real_fx_rates範圍
-            if self.start + self.day >= len(self.real_fx_rates[0]):
-                print(f"Warning: Exceeded real_fx_rates range at day {self.day}")
-                return
-            
-            # ❷ 取得最近 window_size 天的實際匯率（格式 shape: (30, 3)）
-            recent_days = []
-            start_idx = max(0, self.start + self.day - self.window_size)
-            end_idx = self.start + self.day
-            
-            for i in range(start_idx, end_idx):
-                if i < len(self.real_fx_rates[0]):
-                    recent_days.append([
-                        self.real_fx_rates[0][i],
-                        self.real_fx_rates[1][i],
-                        self.real_fx_rates[2][i]
-                    ])
-            
-            # 如果數據不足30天，用最早的數據填充
-            while len(recent_days) < self.window_size:
-                if recent_days:
-                    recent_days.insert(0, recent_days[0])
-                else:
-                    # 使用初始價格
-                    recent_days.append([
-                        self.real_fx_rates[0][0],
-                        self.real_fx_rates[1][0],
-                        self.real_fx_rates[2][0]
-                    ])
-            
-            recent_days = np.array(recent_days[-self.window_size:])  # 確保只取最近30天
-            
-            # ❸ 正規化
-            scaled_input = self.scaler.transform(recent_days)
-            scaled_input = scaled_input.reshape(1, self.window_size, 3)  # shape: (1, 30, 3)
-            
-            # ❹ 預測並還原
-            scaled_pred = self.model.predict(scaled_input, verbose=0)[0]  # shape: (3,)
-            real_pred = self.scaler.inverse_transform([scaled_pred])[0]  # shape: (3,)
-            
-            # ❺ 更新 self.Pre_fx_rates - 修正索引問題
-            target_idx = self.start + self.day
-            
-            # 如果Pre_fx_rates不夠長，擴展它
-            while len(self.Pre_fx_rates[0]) <= target_idx:
-                # 用最後一個預測值填充
-                last_pred = self.Pre_fx_rates[:, -1].reshape(3, 1)
-                self.Pre_fx_rates = np.concatenate([self.Pre_fx_rates, last_pred], axis=1)
-            
-            # 更新預測值
-            self.Pre_fx_rates[:, target_idx] = real_pred
-            
-        except Exception as e:
-            print(f"Prediction error at day {self.day}: {e}")
-            # 使用前一天的預測值作為備用
-            if len(self.Pre_fx_rates[0]) > self.start + self.day - 1:
-                prev_pred = self.Pre_fx_rates[:, self.start + self.day - 1]
-                if len(self.Pre_fx_rates[0]) <= self.start + self.day:
-                    self.Pre_fx_rates = np.concatenate([self.Pre_fx_rates, prev_pred.reshape(3, 1)], axis=1)
+        # ❷ 取得最近 window_size 天的實際匯率（格式 shape: (30, 3)）
+        recent_days = []
+        for i in range(self.start + self.day - self.window_size, self.start + self.day):
+            recent_days.append([
+                self.real_fx_rates[0][i],
+                self.real_fx_rates[1][i],
+                self.real_fx_rates[2][i]
+            ])
+        recent_days = np.array(recent_days)  # shape: (30, 3)
+
+        # ❃ 正規化
+        scaled_input = self.scaler.transform(recent_days)
+        scaled_input = scaled_input.reshape(1, self.window_size, 3)  # shape: (1, 30, 3)
+
+        # ❹ 預測並還原
+        scaled_pred = self.model.predict(scaled_input, verbose=0)[0]  # shape: (3,)
+        real_pred = self.scaler.inverse_transform([scaled_pred])[0]  # shape: (3,)
+
+        # ❺ 更新 self.Pre_fx_rates
+        self.Pre_fx_rates = np.concatenate([self.Pre_fx_rates, real_pred.reshape(3, 1)], axis=1)
 
     def open_position(self, cap_num, any):
         """
         Decide how to open a position based on predicted vs. current price.
         """
-        target_idx = self.start + self.day
-        
-        # 檢查索引是否有效
-        if target_idx >= len(self.Pre_fx_rates[cap_num]):
-            print(f"Warning: Prediction index {target_idx} out of range, using last available prediction")
-            predicted_price = self.Pre_fx_rates[cap_num][-1]
-        else:
-            predicted_price = self.Pre_fx_rates[cap_num][target_idx]
-        
+        predicted_price = self.Pre_fx_rates[cap_num][self.start + self.day]
         current_price = self.now_price[cap_num]
-        
-        # 增加閾值以避免過於頻繁的交易
-        threshold = 0.001  # 0.1%的閾值
-        
-        if predicted_price > current_price * (1 + threshold):
+
+        if predicted_price > current_price:
             return 0, 10  # LONG
-        elif predicted_price < current_price * (1 - threshold):
+        elif predicted_price < current_price:
             return 1, 10  # SHORT
         else:
             return 2, 0  # HOLD
 
     def decide_action(self, any):
-        """決定持倉操作"""
+        """
+        Decide what to do with an existing position.
+        """
         actions = []
-        
+
         for cap_num in range(3):
-            target_idx = self.start + self.day
-            
-            if target_idx >= len(self.Pre_fx_rates[cap_num]):
-                actions.append((2, 0))
-                continue
-                
-            predicted_price = self.Pre_fx_rates[cap_num][target_idx]
+            predicted_price = self.Pre_fx_rates[cap_num][self.start + self.day]
             current_price = self.now_price[cap_num]
             pos = self.position_size[cap_num]
             pnl = self.floating_pnl[cap_num]
 
-            # 止盈止損邏輯
+            # 若賺超過 100 或賠超過 -100 就平倉
             if pnl > 100 or pnl < -100:
+                actions.append((1, abs(pos)))  # CLOSE 全部
+                continue
+
+            # 若預測方向與持倉方向相反 → 平倉
+            if (pos > 0 and predicted_price < current_price) or (pos < 0 and predicted_price > current_price):
                 actions.append((1, abs(pos)))  # CLOSE
                 continue
 
-            # 預測方向與持倉方向相反時平倉
-            threshold = 0.001
-            if (pos > 0 and predicted_price < current_price * (1 - threshold)) or \
-               (pos < 0 and predicted_price > current_price * (1 + threshold)):
-                actions.append((1, abs(pos)))  # CLOSE
-                continue
-
+            # 若預測與方向一致，可選擇加碼
             actions.append((2, 0))  # HOLD
 
-        return actions[self.day % 3] if actions else (2, 0)
+        return actions[self.day % 3]  # 每次 call 只會用一個 cap_num，所以這樣 round-robin 給個值
+
 
     def check_liquidation(self, cap_num, maintenance_margin_ratio_threshold=0.3):
-        """檢查是否需要強制平倉"""
+        """
+        Check if the position should be liquidated (trigger forced liquidation).
+        """
         if self.position_size[cap_num] == 0:
             return False
+            
         equity = self.capital[cap_num] + self.floating_pnl[cap_num]
-        used_margin = abs(self.position_size[cap_num]) * self.margin
+        used_margin = self.margin * abs(self.position_size[cap_num])
+        
         if used_margin == 0:
             return False
+            
         return equity / used_margin < maintenance_margin_ratio_threshold
+
 
     def close_position(self, cap_num, close_price):
         """平倉並計算實現損益"""
@@ -744,23 +696,19 @@ class FXTrading:
             self.entry_price[cap_num] = (self.entry_price[cap_num] * old_value + add_price * add_value) / (old_value + add_value)
 
     def update(self):
-        """更新環境狀態"""
-        if self.start + self.day < len(self.real_fx_rates[0]):
-            self.now_price = np.array([
-                self.real_fx_rates[0][self.start + self.day],
-                self.real_fx_rates[1][self.start + self.day],
-                self.real_fx_rates[2][self.start + self.day]
-            ])
+        """
+        Update environment for current day (prices, margins, PnL, position value).
+        """
+        self.now_price = np.array([
+            self.real_fx_rates[0][self.start + self.day],
+            self.real_fx_rates[1][self.start + self.day],
+            self.real_fx_rates[2][self.start + self.day]
+        ])
 
         self.available_margin = self.capital - abs(self.position_size) * self.margin
         self.position_value = abs(self.margin * self.position_size * self.leverage)
-        
-        # 計算浮動損益
-        for i in range(3):
-            if self.position_size[i] != 0 and self.entry_price[i] != 0:
-                self.floating_pnl[i] = self.position_size[i] * (self.now_price[i] - self.entry_price[i]) * self.leverage[i] * self.margin / self.now_price[i]
-            else:
-                self.floating_pnl[i] = 0
+        self.floating_pnl = self.position_size * (self.now_price - self.entry_price) * self.leverage * self.margin / self.now_price
+
 
 
 class FreeWeatherProvider:
