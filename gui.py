@@ -18,9 +18,15 @@ from sklearn.preprocessing import MinMaxScaler
 import warnings
 from keras.models import load_model
 import joblib
+import os
+import torch
+import torch.nn as nn
+from transformer_lstm import TransformerLSTMTrading, HybridModel
 
-
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+# block UserWarning 
 warnings.filterwarnings('ignore')
+
 # Set matplotlib style for dark theme
 plt.style.use('dark_background')
 class SimulationWindow:
@@ -80,9 +86,9 @@ class SimulationWindow:
         
     def create_control_panel(self, parent):
         """創建控制面板"""
-        control_frame = tk.LabelFrame(parent, text="🎮 Simulation Control", 
-                                     font=self.header_font, fg='#00ff88', bg='#2d2d2d')
-        control_frame.pack(fill='x', padx=10, pady=5)
+        control_frame = tk.LabelFrame(parent, text="🎮 Dual Model Simulation Control",
+                                font=self.header_font, fg='#00ff88', bg='#2d2d2d')
+        control_frame.pack(fill='x', padx=20, pady=5)
         
         # 數據來源選擇
         data_source_frame = tk.Frame(control_frame, bg='#2d2d2d')
@@ -119,18 +125,18 @@ class SimulationWindow:
         
         self.start_btn = tk.Button(button_frame, text="▶️ Start 90-Day Simulation",
                                   command=self.start_simulation,
-                                  bg='#00aa00', fg='white', font=self.normal_font, width=20)
+                                  bg='#00aa00', fg='white', font=self.normal_font, width=25)
         self.start_btn.pack(side='left', padx=5)
         
         self.stop_btn = tk.Button(button_frame, text="⏹️ Stop Simulation",
                                  command=self.stop_simulation,
-                                 bg='#aa0000', fg='white', font=self.normal_font, width=15,
+                                 bg='#aa0000', fg='white', font=self.normal_font, width=20,
                                  state='disabled')
         self.stop_btn.pack(side='left', padx=5)
         
         self.export_btn = tk.Button(button_frame, text="💾 Export Results",
                                    command=self.export_results,
-                                   bg='#0066cc', fg='white', font=self.normal_font, width=15)
+                                   bg='#0066cc', fg='white', font=self.normal_font, width=20)
         self.export_btn.pack(side='left', padx=5)
         
         # 進度條
@@ -423,71 +429,148 @@ class SimulationWindow:
                     self.fx_trading.capital[cap_num] += self.fx_trading.close_position(cap_num, self.fx_trading.now_price[cap_num])
                     self.fx_trading.position_size[cap_num] = 0
 
-
+        # Transformer-LSTM model trading
+        if self.fx_trading.transformer_lstm_trading:
+            self.fx_trading.transformer_lstm_trading.day = day
+            self.fx_trading.transformer_lstm_trading.update()
+            self.fx_trading.transformer_lstm_trading.predict_fx_rate(None)
+            
+            # Transformer-LSTM trading logic
+            for cap_num in range(3):
+                # Check for liquidation first
+                if self.fx_trading.transformer_lstm_trading.position_size[cap_num] != 0 and self.fx_trading.transformer_lstm_trading.check_liquidation(cap_num):
+                    print("Transformer-LSTM Liquidation triggered!")
+                    self.fx_trading.transformer_lstm_trading.capital[cap_num] += self.fx_trading.transformer_lstm_trading.close_position(cap_num, self.fx_trading.transformer_lstm_trading.now_price[cap_num])
+                    self.fx_trading.transformer_lstm_trading.position_size[cap_num] = 0
                 
-                    
+                # Trading decision logic (similar to GRU)
+                if self.fx_trading.transformer_lstm_trading.position_size[cap_num] == 0 and self.fx_trading.transformer_lstm_trading.capital[cap_num] > 0:
+                    action, num = self.fx_trading.transformer_lstm_trading.open_position(cap_num, None)
+                    if action == 0 and num * self.fx_trading.transformer_lstm_trading.margin <= self.fx_trading.transformer_lstm_trading.available_margin[cap_num]:
+                        self.fx_trading.transformer_lstm_trading.position_size[cap_num] = num
+                        self.fx_trading.transformer_lstm_trading.entry_price[cap_num] = self.fx_trading.transformer_lstm_trading.now_price[cap_num]
+                    elif action == 1 and num * self.fx_trading.transformer_lstm_trading.margin <= self.fx_trading.transformer_lstm_trading.available_margin[cap_num]:
+                        self.fx_trading.transformer_lstm_trading.position_size[cap_num] = -num
+                        self.fx_trading.transformer_lstm_trading.entry_price[cap_num] = self.fx_trading.transformer_lstm_trading.now_price[cap_num]
+                else:
+                    action, num = self.fx_trading.transformer_lstm_trading.decide_action(cap_num)
+                    if action == 1:  # CLOSE position
+                        self.fx_trading.transformer_lstm_trading.capital[cap_num] += self.fx_trading.transformer_lstm_trading.close_position(cap_num, self.fx_trading.transformer_lstm_trading.now_price[cap_num])
+                        self.fx_trading.transformer_lstm_trading.position_size[cap_num] = 0        
+
+
     def display_day_data(self, day):
-        """顯示每日詳細數據"""
+        """Display daily detailed data - including dual model comparison in English"""
         currency_pairs = ['USD/JPY', 'USD/EUR', 'USD/GBP']
         
-        # 添加日期標題
         self.data_text.insert(tk.END, f"Day {day}\n", "day_header")
-        self.data_text.insert(tk.END, " \n", "neutral")
+        self.data_text.insert(tk.END, "="*50 + "\n\n", "neutral")
         
-        # 顯示每個貨幣對的數據
+        # GRU Model Results
+        self.data_text.insert(tk.END, "GRU Model:\n", "currency_header")
         for i, pair in enumerate(currency_pairs):
             self.data_text.insert(tk.END, f"{pair}:\n", "currency_header")
             
-            # 預測匯率 vs 實際匯率
-            if len(self.fx_trading.Pre_fx_rates[i]) > self.fx_trading.start + day - 1:
-                pred_rate = self.fx_trading.Pre_fx_rates[i][self.fx_trading.start + day - 1]
-            else:
-                pred_rate = self.fx_trading.now_price[i]
+            # Real rate
             real_rate = self.fx_trading.now_price[i]
-            self.data_text.insert(tk.END, f"Pre_fx_rate: {pred_rate:.6f} real_fx_rates: {real_rate:.6f}\n", "neutral")
+            self.data_text.insert(tk.END, f"real_fx_rates: {real_rate:.6f}\n", "neutral")
             
-            # 資本和保證金信息
+            # GRU prediction
+            if len(self.fx_trading.predictions['gru']) > 0:
+                gru_pred = self.fx_trading.predictions['gru'][-1][i]
+                self.data_text.insert(tk.END, f"Pre_fx_rate: {gru_pred:.6f}\n", "profit")
+            
+            # Trading info
             capital = self.fx_trading.capital[i]
             available_margin = self.fx_trading.available_margin[i]
             position_size = self.fx_trading.position_size[i]
             leverage = self.fx_trading.leverage[i]
-            self.data_text.insert(tk.END, f"Capital: {capital:.1f} available_margin: {available_margin:.1f} position_size: {position_size:.1f} leverage: {leverage}\n", "neutral")
-            
-            # 浮動損益和其他信息
             floating_pnl = self.fx_trading.floating_pnl[i]
             entry_price = self.fx_trading.entry_price[i]
-            position_value = self.fx_trading.position_value[i]
+            position_value = abs(position_size) * self.fx_trading.margin * leverage
             
-            pnl_tag = "profit" if floating_pnl >= 0 else "loss"
-            self.data_text.insert(tk.END, f"floating_pnl: {floating_pnl:.6f} entry_price: {entry_price:.6f} position_value: {position_value:.1f}\n", pnl_tag)
-            self.data_text.insert(tk.END, " \n", "neutral")
+            self.data_text.insert(tk.END, f"Capital: {capital:.13f} available_margin: {available_margin:.13f} position_size: {position_size:.1f} leverage: {leverage}\n", "neutral")
+            self.data_text.insert(tk.END, f"floating_pnl: {floating_pnl:.13f} entry_price: {entry_price:.13f} position_value: {position_value:.1f}\n", "neutral")
+            self.data_text.insert(tk.END, "\n", "neutral")
         
-        # 自動滾動到底部
-        self.data_text.see(tk.END)
-        
-    def display_final_results(self):
-        """顯示最終結果 - 與final.ipynb完全一致"""
-        # Final update after run - 與final.ipynb一致
-        self.fx_trading.capital += self.fx_trading.position_size * (self.fx_trading.now_price - self.fx_trading.entry_price) * self.fx_trading.leverage * self.fx_trading.margin / self.fx_trading.now_price
-        
-        currency_pairs = ['USD/JPY', 'USD/EUR', 'USD/GBP']
-        
-        self.data_text.insert(tk.END, "\n" + "="*50 + "\n", "final_results")
-        self.data_text.insert(tk.END, "Final Results:\n", "final_results")
-        
+        # Transformer-LSTM Model Results
+        self.data_text.insert(tk.END, "Transformer-LSTM Model:\n", "currency_header")
         for i, pair in enumerate(currency_pairs):
-            self.data_text.insert(tk.END, f"{pair}: capital {self.fx_trading.capital[i]}\n", "final_results")
-        
-        # 計算總回報率
-        initial_capital_sum = sum(self.fx_trading.initial_capital)
-        final_capital_sum = sum(self.fx_trading.capital)
-        rate_of_return = final_capital_sum / initial_capital_sum
-        
-        self.data_text.insert(tk.END, f"Rate of Return: {rate_of_return}\n", "final_results")
-        self.data_text.insert(tk.END, "="*50 + "\n", "final_results")
+            self.data_text.insert(tk.END, f"{pair}:\n", "currency_header")
+            
+            # Real rate
+            real_rate = self.fx_trading.now_price[i]
+            self.data_text.insert(tk.END, f"real_fx_rates: {real_rate:.6f}\n", "neutral")
+            
+            # Transformer-LSTM prediction
+            if len(self.fx_trading.predictions['transformer_lstm']) > 0:
+                transformer_pred = self.fx_trading.predictions['transformer_lstm'][-1][i]
+                self.data_text.insert(tk.END, f"Pre_fx_rate: {transformer_pred:.6f}\n", "profit")
+            
+            # Trading info for Transformer-LSTM
+            if self.fx_trading.transformer_lstm_trading:
+                capital = self.fx_trading.transformer_lstm_trading.capital[i]
+                available_margin = self.fx_trading.transformer_lstm_trading.available_margin[i]
+                position_size = self.fx_trading.transformer_lstm_trading.position_size[i]
+                leverage = self.fx_trading.transformer_lstm_trading.leverage[i]
+                floating_pnl = self.fx_trading.transformer_lstm_trading.floating_pnl[i]
+                entry_price = self.fx_trading.transformer_lstm_trading.entry_price[i]
+                position_value = abs(position_size) * self.fx_trading.transformer_lstm_trading.margin * leverage
+                
+                self.data_text.insert(tk.END, f"Capital: {capital:.13f} available_margin: {available_margin:.13f} position_size: {position_size:.1f} leverage: {leverage}\n", "neutral")
+                self.data_text.insert(tk.END, f"floating_pnl: {floating_pnl:.13f} entry_price: {entry_price:.13f} position_value: {position_value:.1f}\n", "neutral")
+            
+            self.data_text.insert(tk.END, "\n", "neutral")
         
         self.data_text.see(tk.END)
 
+        
+    def display_final_results(self):
+        """Display final results - dual model comparison in English"""
+        currency_pairs = ['USD/JPY', 'USD/EUR', 'USD/GBP']
+        
+        # GRU Model Final Results
+        self.data_text.insert(tk.END, "\n" + "="*60 + "\n", "final_results")
+        self.data_text.insert(tk.END, "GRU Model Final Results:\n", "final_results")
+        
+        gru_total = 0
+        for i, pair in enumerate(currency_pairs):
+            capital = self.fx_trading.capital[i]
+            gru_total += capital
+            self.data_text.insert(tk.END, f"{pair}: capital {capital:.13f}\n", "profit")
+        
+        gru_return = gru_total / 3000
+        self.data_text.insert(tk.END, f"Rate of Return: {gru_return:.13f}\n", "final_results")
+        
+        # Transformer-LSTM Model Final Results
+        self.data_text.insert(tk.END, "\nTransformer-LSTM Model Final Results:\n", "final_results")
+        
+        transformer_total = 0
+        if self.fx_trading.transformer_lstm_trading:
+            for i, pair in enumerate(currency_pairs):
+                capital = self.fx_trading.transformer_lstm_trading.capital[i]
+                transformer_total += capital
+                self.data_text.insert(tk.END, f"{pair}: capital {capital:.13f}\n", "profit")
+            
+            transformer_return = transformer_total / 3000
+            self.data_text.insert(tk.END, f"Rate of Return: {transformer_return:.13f}\n", "final_results")
+            
+            # Model Comparison
+            self.data_text.insert(tk.END, "\n" + "="*60 + "\n", "final_results")
+            self.data_text.insert(tk.END, "Model Performance Comparison:\n", "final_results")
+            
+            if gru_return > transformer_return:
+                winner = "GRU"
+                difference = gru_return - transformer_return
+                self.data_text.insert(tk.END, f"🏆 {winner} Model Wins!\n", "profit")
+            else:
+                winner = "Transformer-LSTM"
+                difference = transformer_return - gru_return
+                self.data_text.insert(tk.END, f"🏆 {winner} Model Wins!\n", "profit")
+            
+            self.data_text.insert(tk.END, f"Return Rate Difference: {difference:.13f}\n", "neutral")
+        
+        self.data_text.insert(tk.END, "="*60 + "\n", "final_results")
         
     def update_progress(self, day):
         """更新進度條"""
@@ -495,43 +578,57 @@ class SimulationWindow:
         self.progress_label.config(text=f"{day}/90 days")
         
     def update_charts(self):
-        """更新圖表"""
+        """更新圖表 - 顯示兩個模型預測比較"""
         if not self.fx_trading:
             return
-            
+
         currency_pairs = ['USD/JPY', 'USD/EUR', 'USD/GBP']
         
         for i, pair in enumerate(currency_pairs):
             ax = self.axes[pair]
             ax.clear()
             
-            # 獲取歷史數據
             current_day = self.fx_trading.day
             if current_day > 0:
                 days = list(range(1, current_day + 1))
                 actual_prices = []
-                predicted_prices = []
+                gru_predictions = []
+                transformer_predictions = []
                 
                 for day in range(current_day):
                     actual_prices.append(self.fx_trading.real_fx_rates[i][self.fx_trading.start + day])
-                    if day < len(self.fx_trading.Pre_fx_rates[i]) - self.fx_trading.start:
-                        predicted_prices.append(self.fx_trading.Pre_fx_rates[i][self.fx_trading.start + day])
+                    
+                    if day < len(self.fx_trading.predictions['gru']):
+                        gru_predictions.append(self.fx_trading.predictions['gru'][day][i])
+                    if day < len(self.fx_trading.predictions['transformer_lstm']):
+                        transformer_predictions.append(self.fx_trading.predictions['transformer_lstm'][day][i])
                 
-                # 繪製實際價格和預測價格
+                # 繪製實際價格 - 確保有 label
                 if actual_prices:
-                    ax.plot(days, actual_prices, color='#00ff88', linewidth=2, label='Actual Price')
-                if predicted_prices and len(predicted_prices) == len(days):
-                    ax.plot(days, predicted_prices, color='#ffaa00', linewidth=2, linestyle='--', label='Predicted Price')
+                    ax.plot(days, actual_prices, color='#00ff88', linewidth=2, label='Actual')
                 
-                # 設置圖表樣式
-                ax.set_facecolor('#1e1e1e')
-                ax.tick_params(colors='white', labelsize=8)
-                ax.set_ylabel(f'{pair}', color='white', fontsize=9)
-                ax.grid(True, alpha=0.3)
+                # 繪製GRU預測 - 確保有 label
+                if gru_predictions and len(gru_predictions) == len(days):
+                    ax.plot(days, gru_predictions, color='#ffaa00', linewidth=2, linestyle='--', label='GRU predict')
+                
+                # 繪製Transformer-LSTM預測 - 確保有 label
+                if transformer_predictions and len(transformer_predictions) == len(days):
+                    ax.plot(days, transformer_predictions, color='#ff6600', linewidth=2, linestyle=':', label='Transformer-LSTM predict')
+            
+            # 設置圖表樣式
+            ax.set_facecolor('#1e1e1e')
+            ax.tick_params(colors='white', labelsize=8)
+            ax.set_ylabel(f'{pair}', color='white', fontsize=9)
+            ax.grid(True, alpha=0.3)
+            
+            # 只有在有數據時才顯示圖例
+            handles, labels = ax.get_legend_handles_labels()
+            if handles:  # 確保有可用的 handles
                 ax.legend(fontsize=8)
         
         self.fig.tight_layout()
         self.canvas.draw()
+
         
     def export_results(self):
         """匯出結果"""
@@ -582,23 +679,126 @@ class FXTrading:
 
         self.entry_price = np.array([0, 0, 0], dtype=float)
         self.margin = 10
+        self.window_size = 30  # 新增：GRU模型需要的時間窗口
+
+        # 新增：載入兩個模型
+        self.models = {}
+        self.scalers = {}
         
-        # ❶ 載入訓練好的模型與 scaler
+        # 載入GRU模型
         try:
-            self.model = load_model("fx_model_gru.h5", compile=False)
-            self.scaler = joblib.load("scaler.pkl")
-            self.window_size = 30  # 必須和訓練時一致
-            print("✅ 成功載入訓練好的GRU模型和scaler")
+            self.models['gru'] = load_model("fx_model_gru.h5", compile=False)
+            self.scalers['gru'] = joblib.load("scaler.pkl")
+            print("✅ 成功載入GRU模型")
         except Exception as e:
-            print(f"❌ 載入模型失敗: {e}")
-            print("請確保 fx_model_gru.h5 和 scaler.pkl 檔案存在於當前目錄")
-            raise
+            print(f"❌ 載入GRU模型失敗: {e}")
+            self.models['gru'] = None
+            self.scalers['gru'] = None
+            
+        # 載入Transformer-LSTM模型
+        try:
+            import torch
+            from transformer_lstm import HybridModel
+            
+            self.models['transformer_lstm'] = {}
+            self.scalers['transformer_lstm'] = {}
+            
+            currency_pairs = ['USDJPY', 'EURUSD', 'GBPUSD']
+            for i, pair in enumerate(currency_pairs):
+                model = HybridModel(input_dim=11)
+                model.load_state_dict(torch.load(f"saved_models/{pair}_hybrid_model.pth", map_location='cpu'))
+                model.eval()
+                self.models['transformer_lstm'][i] = model
+                
+                scaler_path = f"saved_models/{pair}_scaler.pkl"
+                if os.path.exists(scaler_path):
+                    self.scalers['transformer_lstm'][i] = joblib.load(scaler_path)
+                else:
+                    from sklearn.preprocessing import MinMaxScaler
+                    self.scalers['transformer_lstm'][i] = MinMaxScaler()
+            print("✅ 成功載入Transformer-LSTM模型")
+        except Exception as e:
+            print(f"❌ 載入Transformer-LSTM模型失敗: {e}")
+            self.models['transformer_lstm'] = {}
+            self.scalers['transformer_lstm'] = {}
+        
+        # 預測結果儲存
+        self.predictions = {
+            'gru': [],
+            'transformer_lstm': []
+        }
+        
+        # 新增：初始化 Transformer-LSTM 交易環境
+        try:
+            from transformer_lstm import TransformerLSTMTrading
+            self.transformer_lstm_trading = TransformerLSTMTrading(fx_rates, real_fx_rates)
+        except Exception as e:
+            print(f"❌ 初始化Transformer-LSTM交易環境失敗: {e}")
+            self.transformer_lstm_trading = None
+        
+        # 儲存兩個模型的交易結果
+        self.trading_results = {
+            'gru': {'capital': np.array([1000, 1000, 1000], dtype=float)},
+            'transformer_lstm': {'capital': np.array([1000, 1000, 1000], dtype=float)}
+        }
+        
+    def predict_with_transformer_lstm(self):
+        """Transformer-LSTM模型預測"""
+        predictions = []
+        
+        for i in range(3):
+            if i not in self.models['transformer_lstm']:
+                predictions.append(self.real_fx_rates[i][self.start + self.day - 1])
+                continue
+                
+            try:
+                # 取得歷史數據
+                if self.start + self.day < 60:
+                    start_idx = 0
+                    end_idx = self.start + self.day
+                else:
+                    start_idx = self.start + self.day - 60
+                    end_idx = self.start + self.day
+                
+                price_data = self.real_fx_rates[i][start_idx:end_idx]
+                features = self.create_features(price_data)
+                
+                if len(features) < 60:
+                    padding = np.tile(features[0], (60 - len(features), 1))
+                    features = np.vstack([padding, features])
+                elif len(features) > 60:
+                    features = features[-60:]
+                
+                scaled_input = self.scalers['transformer_lstm'][i].fit_transform(features)
+                scaled_input = torch.tensor(scaled_input.reshape(1, 60, -1), dtype=torch.float32)
+                
+                with torch.no_grad():
+                    scaled_pred = self.models['transformer_lstm'][i](scaled_input).cpu().numpy()[0, 0]
+                
+                pred_price = scaled_pred * (np.max(price_data) - np.min(price_data)) + np.min(price_data)
+                predictions.append(pred_price)
+                
+            except Exception as e:
+                print(f"Transformer-LSTM預測失敗: {e}")
+                predictions.append(self.real_fx_rates[i][self.start + self.day - 1])
+        
+        return np.array(predictions)
 
     def predict_fx_rate(self, data=None):
-        """
-        使用 GRU 模型預測下一日三種匯率，並更新 self.Pre_fx_rates。
-        """
-        # ❷ 取得最近 window_size 天的實際匯率（格式 shape: (30, 3)）
+        """同時使用兩個模型進行預測"""
+        gru_predictions = self.predict_with_gru()
+        transformer_predictions = self.predict_with_transformer_lstm()
+        
+        # 儲存預測結果用於比較
+        self.predictions['gru'].append(gru_predictions)
+        self.predictions['transformer_lstm'].append(transformer_predictions)
+        
+        # 使用GRU預測作為主要交易信號（或可以改為平均）
+        new_predictions = gru_predictions.reshape(3, 1)
+        self.Pre_fx_rates = np.concatenate([self.Pre_fx_rates, new_predictions], axis=1)
+        
+    def predict_with_gru(self):
+        """GRU模型預測"""
         recent_days = []
         for i in range(self.start + self.day - self.window_size, self.start + self.day):
             recent_days.append([
@@ -606,19 +806,91 @@ class FXTrading:
                 self.real_fx_rates[1][i],
                 self.real_fx_rates[2][i]
             ])
-        recent_days = np.array(recent_days)  # shape: (30, 3)
-
-        # ❃ 正規化
-        scaled_input = self.scaler.transform(recent_days)
-        scaled_input = scaled_input.reshape(1, self.window_size, 3)  # shape: (1, 30, 3)
-
-        # ❹ 預測並還原
-        scaled_pred = self.model.predict(scaled_input, verbose=0)[0]  # shape: (3,)
-        real_pred = self.scaler.inverse_transform([scaled_pred])[0]  # shape: (3,)
-
-        # ❺ 更新 self.Pre_fx_rates
-        self.Pre_fx_rates = np.concatenate([self.Pre_fx_rates, real_pred.reshape(3, 1)], axis=1)
-
+        
+        recent_days = np.array(recent_days)
+        scaled_input = self.scalers['gru'].transform(recent_days)
+        scaled_input = scaled_input.reshape(1, self.window_size, 3)
+        
+        scaled_pred = self.models['gru'].predict(scaled_input, verbose=0)[0]
+        real_pred = self.scalers['gru'].inverse_transform([scaled_pred])[0]
+        
+        return real_pred
+    
+    def predict_fx_rate(self, data=None):
+        """同時使用兩個模型進行預測"""
+        gru_predictions = self.predict_with_gru()
+        transformer_predictions = self.predict_with_transformer_lstm()
+        
+        # 儲存預測結果用於比較
+        self.predictions['gru'].append(gru_predictions)
+        self.predictions['transformer_lstm'].append(transformer_predictions)
+        
+        # 使用GRU預測作為主要交易信號（或可以改為平均）
+        new_predictions = gru_predictions.reshape(3, 1)
+        self.Pre_fx_rates = np.concatenate([self.Pre_fx_rates, new_predictions], axis=1)
+        
+    def predict_with_gru(self):
+        """GRU模型預測"""
+        recent_days = []
+        for i in range(self.start + self.day - self.window_size, self.start + self.day):
+            recent_days.append([
+                self.real_fx_rates[0][i],
+                self.real_fx_rates[1][i],
+                self.real_fx_rates[2][i]
+            ])
+        
+        recent_days = np.array(recent_days)
+        scaled_input = self.scalers['gru'].transform(recent_days)
+        scaled_input = scaled_input.reshape(1, self.window_size, 3)
+        
+        scaled_pred = self.models['gru'].predict(scaled_input, verbose=0)[0]
+        real_pred = self.scalers['gru'].inverse_transform([scaled_pred])[0]
+        
+        return real_pred
+    
+    def create_features(self, price_data):
+        """
+        從價格數據創建技術指標特徵
+        """
+        if len(price_data) < 50:
+            # 如果數據不足，創建簡化特徵
+            features = np.zeros((len(price_data), 11))
+            features[:, 0] = price_data  # Close price
+            for i in range(1, 11):
+                features[:, i] = price_data  # 其他特徵暫時用價格填充
+            return features
+        
+        df = pd.DataFrame({
+            'Close': price_data,
+            'High': price_data,
+            'Low': price_data,
+            'Open': price_data
+        })
+        
+        # 計算技術指標
+        df['MA10'] = df['Close'].rolling(10, min_periods=1).mean()
+        df['MA50'] = df['Close'].rolling(50, min_periods=1).mean()
+        df['EMA10'] = df['Close'].ewm(span=10).mean()
+        df['EMA50'] = df['Close'].ewm(span=50).mean()
+        df['STD20'] = df['Close'].rolling(20, min_periods=1).std()
+        df['Bollinger_High'] = df['MA10'] + 2 * df['STD20']
+        df['Bollinger_Low'] = df['MA10'] - 2 * df['STD20']
+        df['Bollinger_Width'] = df['Bollinger_High'] - df['Bollinger_Low']
+        
+        # RSI simplify
+        pct_change = df['Close'].pct_change()
+        df['RSI'] = 50 + pct_change.rolling(14, min_periods=1).mean() * 100
+        
+        df['MOM'] = df['Close'].diff(10).fillna(0)
+        df['MACD'] = df['EMA10'] - df['EMA50']
+        df['ATR'] = df['Close'].diff().abs().rolling(14, min_periods=1).mean()
+        
+        # 選擇特徵
+        features = ['Close', 'MA10', 'MA50', 'EMA10', 'EMA50', 'STD20',
+                   'Bollinger_Width', 'RSI', 'MOM', 'MACD', 'ATR']
+        
+        return df[features].ffill().bfill().values
+    
     def open_position(self, cap_num, any):
         """
         Decide how to open a position based on predicted vs. current price.
